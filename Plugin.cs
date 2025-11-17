@@ -9,6 +9,9 @@ using System.IO;
 using System.Reflection;
 using MU3.Mecha;
 using MU3.DB;
+using WebSocketSharp.Server;
+using WebSocketSharp;
+using LitJson;
 
 namespace InputMonitorMod
 {
@@ -17,14 +20,14 @@ namespace InputMonitorMod
     {
         internal static new ManualLogSource Logger = null!;
 
-        static string listenAddr = "http://127.0.0.1:9716/";
+        static PluginConfig config = null!;
+        static string listenAddr = null!;
         
         static InputState currentState = null!;
         static InputState exportedState = null!;
         
-        private System.Net.HttpListener httpListener = null!;
-        private Thread listenerThread = null!;
-        private bool isRunning = false;
+        private HttpServer server = null!;
+        private int frameCounter = 0;
 
         private void Awake()
         {
@@ -37,142 +40,101 @@ namespace InputMonitorMod
             Harmony.CreateAndPatchAll(typeof(Plugin));
             Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} Started!");
 
-            currentState = new InputState();
-            exportedState = new InputState();
+            config = PluginConfig.Load(Logger);
+            listenAddr = $"http://127.0.0.1:{config.Port}/";
 
-            StartHttpServer();
+            currentState = new InputState(config);
+            exportedState = new InputState(config);
+
+            StartWebSocketServer();
         }
 
         private void OnDestroy()
         {
-            StopHttpServer();
+            StopWebSocketServer();
         }
 
         private void Update()
         {
+            frameCounter++;
+            if (frameCounter % config.FrameSkip != 0) return;
+            
             Jvs jvs = MechaManager.jvs;
             if (jvs == null) return;
 
             currentState.UpdateFromJvs(jvs);
 
-            if (!currentState.Equals(exportedState))
+            if (!currentState.isDirty) return;
+
+            if (currentState.HasChanges(exportedState))
             {
                 lock (exportedState)
                 {
                     exportedState.CopyFrom(currentState);
+                    currentState.isDirty = false;
                     Monitor.Pulse(exportedState);
                 }
             }
+            else
+            {
+                currentState.isDirty = false;
+            }
         }
 
-        private void StartHttpServer()
+        private void StartWebSocketServer()
         {
             try
             {
-                httpListener = new System.Net.HttpListener();
-                httpListener.Prefixes.Add(listenAddr);
-                httpListener.Start();
-                isRunning = true;
-
-                listenerThread = new Thread(HandleRequests);
-                listenerThread.IsBackground = true;
-                listenerThread.Start();
-
-                Logger.LogInfo($"HTTP Server started on {listenAddr}");
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError($"Failed to start HTTP server: {ex.Message}");
-            }
-        }
-
-        private void StopHttpServer()
-        {
-            isRunning = false;
-            if (httpListener != null && httpListener.IsListening)
-            {
-                httpListener.Stop();
-                httpListener.Close();
-            }
-            if (listenerThread != null && listenerThread.IsAlive)
-            {
-                listenerThread.Join(1000);
-            }
-        }
-
-        private void HandleRequests()
-        {
-            while (isRunning)
-            {
-                try
+                server = new HttpServer(listenAddr);
+                server.OnGet += (sender, e) =>
                 {
-                    var context = httpListener.GetContext();
-                    var request = context.Request;
-                    var response = context.Response;
-
-                    response.Headers.Add("Access-Control-Allow-Origin", "*");
-                    response.Headers.Add("Access-Control-Allow-Methods", "GET, OPTIONS");
-                    response.Headers.Add("Access-Control-Allow-Headers", "Content-Type");
-
-                    if (request.HttpMethod == "OPTIONS")
+                    var req = e.Request;
+                    var res = e.Response;
+                    if (req.RawUrl == "/")
                     {
-                        response.StatusCode = 200;
-                        response.Close();
-                        continue;
+                        res.ContentType = "text/html";
+                        byte[] buffer = Encoding.UTF8.GetBytes(GetHtmlPage());
+                        res.ContentLength64 = buffer.Length;
+                        res.OutputStream.Write(buffer, 0, buffer.Length);
+                        res.Close();
                     }
-
-                    if (request.Url.AbsolutePath == "/state")
+                    else if (req.RawUrl.StartsWith("/images/"))
                     {
-                        string responseString;
-                        lock (exportedState)
-                        {
-                            responseString = exportedState.ToJson();
-                        }
-                        response.ContentType = "application/json";
-                        byte[] buffer = Encoding.UTF8.GetBytes(responseString);
-                        response.ContentLength64 = buffer.Length;
-                        response.OutputStream.Write(buffer, 0, buffer.Length);
-                        response.OutputStream.Close();
-                    }
-                    else if (request.Url.AbsolutePath == "/")
-                    {
-                        string responseString = GetHtmlPage();
-                        response.ContentType = "text/html";
-                        byte[] buffer = Encoding.UTF8.GetBytes(responseString);
-                        response.ContentLength64 = buffer.Length;
-                        response.OutputStream.Write(buffer, 0, buffer.Length);
-                        response.OutputStream.Close();
-                    }
-                    else if (request.Url.AbsolutePath.StartsWith("/images/"))
-                    {
-                        ServeStaticFile(request, response);
+                        ServeStaticFile(req, res);
                     }
                     else
                     {
-                        response.StatusCode = 404;
-                        string responseString = "Not Found";
-                        byte[] buffer = Encoding.UTF8.GetBytes(responseString);
-                        response.ContentLength64 = buffer.Length;
-                        response.OutputStream.Write(buffer, 0, buffer.Length);
-                        response.OutputStream.Close();
+                        res.StatusCode = 404;
+                        res.Close();
                     }
-                }
-                catch (Exception ex)
+                };
+                server.AddWebSocketService<InputStateService>("/state", () =>
                 {
-                    if (isRunning)
-                    {
-                        Logger.LogError($"Error handling request: {ex.Message}");
-                    }
-                }
+                    return new InputStateService(exportedState, Logger);
+                });
+                server.Start();
+                Logger.LogInfo($"WebSocket Server started on {listenAddr}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Failed to start WebSocket server: {ex.Message}");
             }
         }
 
-        private void ServeStaticFile(System.Net.HttpListenerRequest request, System.Net.HttpListenerResponse response)
+        private void StopWebSocketServer()
+        {
+            if (server != null && server.IsListening)
+            {
+                server.Stop();
+            }
+        }
+
+        private void ServeStaticFile(WebSocketSharp.Net.HttpListenerRequest request, WebSocketSharp.Net.HttpListenerResponse response)
         {
             try
             {
                 string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-                string relativePath = request.Url.AbsolutePath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+                string relativePath = request.RawUrl.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
                 string filePath = Path.Combine(pluginDir, relativePath);
                 
                 if (!File.Exists(filePath))
@@ -208,7 +170,7 @@ namespace InputMonitorMod
                 response.ContentLength64 = fileBytes.Length;
                 response.StatusCode = 200;
                 response.OutputStream.Write(fileBytes, 0, fileBytes.Length);
-                response.OutputStream.Close();
+                response.Close();
             }
             catch (Exception ex)
             {
@@ -393,8 +355,6 @@ namespace InputMonitorMod
         
         let lastLeverKey = '0';
         let lastLeverPos = 0;
-        let lastSubPos = 0;
-        let leverStableCount = 0;
         let firstUpdate = true;
         let preferLeft = false;
         
@@ -480,28 +440,19 @@ namespace InputMonitorMod
             
             const leverKey = getLeverKey(data.lever.value);
             const currentLeverPos = data.lever.raw;
-            const currentSubPos = data.lever.direct;
+            const isLeverReleased = data.lever.isReleased || false;
             
             if (currentLeverPos !== lastLeverPos) {
-                console.log('[Lever] Position changed from', lastLeverPos, 'to', currentLeverPos);
                 hideAllLeverImages(lastLeverKey);
                 lastLeverKey = leverKey;
                 lastLeverPos = currentLeverPos;
-                leverStableCount = 0;
-            } else if (currentSubPos === lastSubPos) {
-                leverStableCount++;
-            } else {
-                leverStableCount = 0;
             }
-            lastSubPos = currentSubPos;
             
             hideAllLeverImages(leverKey);
             const restLeft = images.get('rest_l');
             const restRight = images.get('rest_r');
             if (restLeft) { restLeft.classList.remove('visible'); restLeft.classList.add('hidden'); }
             if (restRight) { restRight.classList.remove('visible'); restRight.classList.add('hidden'); }
-            
-            const isLeverReleased = leverStableCount > 30;
             
             if (hasLeftButtons && hasRightButtons) {
                 const swingImg = images.get('swing_' + leverKey);
@@ -676,15 +627,32 @@ namespace InputMonitorMod
             }
         }
         
-        function pollState() {
-            fetch('/state')
-                .then(r => r.json())
-                .then(data => updateDisplay(data))
-                .catch(err => console.error('Poll error:', err));
-        }
+        const ws = new WebSocket('ws://127.0.0.1:" + config.Port + @"/state');
         
-        setInterval(pollState, 16);
-        pollState();
+        ws.onopen = function() {
+            console.log('[WebSocket] Connected');
+            ws.send('request_state');
+        };
+        
+        ws.onmessage = function(event) {
+            try {
+                const data = JSON.parse(event.data);
+                updateDisplay(data);
+            } catch (err) {
+                console.error('[WebSocket] Parse error:', err);
+            }
+        };
+        
+        ws.onerror = function(error) {
+            console.error('[WebSocket] Error:', error);
+        };
+        
+        ws.onclose = function() {
+            console.log('[WebSocket] Disconnected, reconnecting...');
+            setTimeout(function() {
+                location.reload();
+            }, 1000);
+        };
     </script>
 </body>
 </html>";
@@ -695,9 +663,19 @@ namespace InputMonitorMod
     {
         public Dictionary<string, bool> buttons = new Dictionary<string, bool>();
         public LeverState lever = new LeverState();
+        
+        private float lastLeverRaw = 0f;
+        private long lastLeverDirect = 0;
+        private float leverStableTime = 0f;
+        private DateTime lastUpdateTime = DateTime.Now;
+        
+        private PluginConfig config;
+        
+        public bool isDirty = false;
 
-        public InputState()
+        public InputState(PluginConfig config)
         {
+            this.config = config;
             var buttonNames = new[] { 
                 "Test", "Service", "Left1", "Left2", "Left3", 
                 "Right1", "Right2", "Right3", "LeftWall", "RightWall",
@@ -711,24 +689,83 @@ namespace InputMonitorMod
 
         public void UpdateFromJvs(Jvs jvs)
         {
-            buttons["Test"] = jvs.getRawState(JvsButtonID.Test);
-            buttons["Service"] = jvs.getRawState(JvsButtonID.Service);
-            buttons["Left1"] = jvs.getRawState(JvsButtonID.Left1);
-            buttons["Left2"] = jvs.getRawState(JvsButtonID.Left2);
-            buttons["Left3"] = jvs.getRawState(JvsButtonID.Left3);
-            buttons["Right1"] = jvs.getRawState(JvsButtonID.Right1);
-            buttons["Right2"] = jvs.getRawState(JvsButtonID.Right2);
-            buttons["Right3"] = jvs.getRawState(JvsButtonID.Right3);
-            buttons["LeftWall"] = jvs.getRawState(JvsButtonID.LeftWall);
-            buttons["RightWall"] = jvs.getRawState(JvsButtonID.RightWall);
-            buttons["LeftMenu"] = jvs.getRawState(JvsButtonID.LeftMenu);
-            buttons["RightMenu"] = jvs.getRawState(JvsButtonID.RightMenu);
+            bool changed = false;
+            
+            bool testState = jvs.getRawState(JvsButtonID.Test);
+            if (buttons["Test"] != testState) { buttons["Test"] = testState; changed = true; }
+            
+            bool serviceState = jvs.getRawState(JvsButtonID.Service);
+            if (buttons["Service"] != serviceState) { buttons["Service"] = serviceState; changed = true; }
+            
+            bool left1State = jvs.getRawState(JvsButtonID.Left1);
+            if (buttons["Left1"] != left1State) { buttons["Left1"] = left1State; changed = true; }
+            
+            bool left2State = jvs.getRawState(JvsButtonID.Left2);
+            if (buttons["Left2"] != left2State) { buttons["Left2"] = left2State; changed = true; }
+            
+            bool left3State = jvs.getRawState(JvsButtonID.Left3);
+            if (buttons["Left3"] != left3State) { buttons["Left3"] = left3State; changed = true; }
+            
+            bool right1State = jvs.getRawState(JvsButtonID.Right1);
+            if (buttons["Right1"] != right1State) { buttons["Right1"] = right1State; changed = true; }
+            
+            bool right2State = jvs.getRawState(JvsButtonID.Right2);
+            if (buttons["Right2"] != right2State) { buttons["Right2"] = right2State; changed = true; }
+            
+            bool right3State = jvs.getRawState(JvsButtonID.Right3);
+            if (buttons["Right3"] != right3State) { buttons["Right3"] = right3State; changed = true; }
+            
+            bool leftWallState = jvs.getRawState(JvsButtonID.LeftWall);
+            if (buttons["LeftWall"] != leftWallState) { buttons["LeftWall"] = leftWallState; changed = true; }
+            
+            bool rightWallState = jvs.getRawState(JvsButtonID.RightWall);
+            if (buttons["RightWall"] != rightWallState) { buttons["RightWall"] = rightWallState; changed = true; }
+            
+            bool leftMenuState = jvs.getRawState(JvsButtonID.LeftMenu);
+            if (buttons["LeftMenu"] != leftMenuState) { buttons["LeftMenu"] = leftMenuState; changed = true; }
+            
+            bool rightMenuState = jvs.getRawState(JvsButtonID.RightMenu);
+            if (buttons["RightMenu"] != rightMenuState) { buttons["RightMenu"] = rightMenuState; changed = true; }
 
+            DateTime now = DateTime.Now;
+            float deltaTime = (float)(now - lastUpdateTime).TotalSeconds;
+            lastUpdateTime = now;
+
+            float currentRaw = jvs.getAnalogRaw();
+            long currentDirect = jvs.getAnalogDirect();
+            
+            if (currentRaw != lastLeverRaw)
+            {
+                leverStableTime = 0f;
+                lastLeverRaw = currentRaw;
+                changed = true;
+            }
+            else if (currentDirect != lastLeverDirect)
+            {
+                leverStableTime = 0f;
+                changed = true;
+            }
+            else
+            {
+                leverStableTime += deltaTime;
+                if (leverStableTime >= config.LeverReleaseTime)
+                {
+                    changed = true;
+                }
+            }
+            lastLeverDirect = currentDirect;
+            
             lever.value = jvs.getAnalog();
-            lever.raw = jvs.getAnalogRaw();
-            lever.direct = jvs.getAnalogDirect();
+            lever.raw = currentRaw;
+            lever.direct = currentDirect;
             lever.min = jvs.getAnalogMin();
             lever.max = jvs.getAnalogMax();
+            lever.isReleased = leverStableTime > config.LeverReleaseTime;
+            
+            if (changed)
+            {
+                isDirty = true;
+            }
         }
 
         public void CopyFrom(InputState other)
@@ -738,46 +775,31 @@ namespace InputMonitorMod
                 buttons[key] = other.buttons[key];
             }
             lever.CopyFrom(other.lever);
+            lastLeverRaw = other.lastLeverRaw;
+            lastLeverDirect = other.lastLeverDirect;
+            leverStableTime = other.leverStableTime;
+            lastUpdateTime = other.lastUpdateTime;
         }
 
-        public bool Equals(InputState other)
+        public bool HasChanges(InputState other)
         {
-            if (other == null) return false;
+            if (other == null) return true;
+            
+            if (!lever.Equals(other.lever))
+                return true;
             
             foreach (var key in buttons.Keys)
             {
                 if (buttons[key] != other.buttons[key])
-                    return false;
+                    return true;
             }
             
-            return lever.Equals(other.lever);
+            return false;
         }
-
-        public string ToJson()
+        
+        public bool Equals(InputState other)
         {
-            var sb = new StringBuilder();
-            sb.Append("{");
-            
-            sb.Append("\"buttons\":{");
-            bool first = true;
-            foreach (var kvp in buttons)
-            {
-                if (!first) sb.Append(",");
-                sb.Append($"\"{kvp.Key}\":{(kvp.Value ? "true" : "false")}");
-                first = false;
-            }
-            sb.Append("},");
-            
-            sb.Append("\"lever\":{");
-            sb.Append($"\"value\":{lever.value:F3},");
-            sb.Append($"\"raw\":{lever.raw:F3},");
-            sb.Append($"\"direct\":{lever.direct},");
-            sb.Append($"\"min\":{lever.min:F3},");
-            sb.Append($"\"max\":{lever.max:F3}");
-            sb.Append("}");
-            
-            sb.Append("}");
-            return sb.ToString();
+            return !HasChanges(other);
         }
     }
 
@@ -788,6 +810,7 @@ namespace InputMonitorMod
         public long direct;
         public float min;
         public float max;
+        public bool isReleased;
 
         public void CopyFrom(LeverState other)
         {
@@ -796,6 +819,7 @@ namespace InputMonitorMod
             direct = other.direct;
             min = other.min;
             max = other.max;
+            isReleased = other.isReleased;
         }
 
         public bool Equals(LeverState other)
@@ -805,7 +829,51 @@ namespace InputMonitorMod
                    raw == other.raw && 
                    direct == other.direct &&
                    min == other.min &&
-                   max == other.max;
+                   max == other.max &&
+                   isReleased == other.isReleased;
+        }
+    }
+
+    public class InputStateService : WebSocketBehavior
+    {
+        private InputState state;
+        private ManualLogSource logger;
+        private Thread watcher;
+
+        public InputStateService(InputState state, ManualLogSource logger)
+        {
+            this.state = state;
+            this.logger = logger;
+            this.watcher = new Thread(() => { this.ServiceLoop(); });
+            watcher.IsBackground = true;
+            watcher.Start();
+        }
+
+        private void ServiceLoop()
+        {
+            while (true)
+            {
+                string serialized;
+                lock (state)
+                {
+                    Monitor.Wait(state);
+                    serialized = JsonMapper.ToJson(state);
+                }
+                Sessions.Broadcast(serialized);
+            }
+        }
+
+        protected override void OnMessage(MessageEventArgs e)
+        {
+            if (e.Data == "request_state")
+            {
+                string serialized;
+                lock (state)
+                {
+                    serialized = JsonMapper.ToJson(state);
+                }
+                Send(serialized);
+            }
         }
     }
 }
