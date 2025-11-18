@@ -249,11 +249,13 @@ namespace InputMonitorMod
             { key: 'rest_r', image_url: 'images/buttons/r_0.png' }
         ];
         
+        const CANVAS_WIDTH = 600;
+        const CANVAS_HEIGHT = 800;
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const dpr = window.devicePixelRatio || 1;
-        canvas.width = 600 * dpr;
-        canvas.height = 800 * dpr;
+        canvas.width = CANVAS_WIDTH * dpr;
+        canvas.height = CANVAS_HEIGHT * dpr;
         ctx.scale(dpr, dpr);
         const buttonMapping = {
             'LeftWall': '1_on',
@@ -268,10 +270,8 @@ namespace InputMonitorMod
         const images = new Map();
         const leftButtons = new Set(['LeftWall', 'Left1', 'Left2', 'Left3']);
         const rightButtons = new Set(['Right1', 'Right2', 'Right3', 'RightWall']);
-        let loadedCount = 0;
         BUTTONS_DATA.forEach(button => {
             const img = new Image();
-            img.onload = () => { loadedCount++; };
             img.src = button.image_url;
             images.set(button.key, img);
         });
@@ -415,12 +415,19 @@ namespace InputMonitorMod
             ws.send('request_state');
         };
         
+        let pendingRender = false;
         ws.onmessage = function(event) {
             try {
                 if (event.data instanceof ArrayBuffer) {
                     const data = parseBinaryData(event.data);
                     updateDisplay(data);
-                    render();
+                    if (!pendingRender) {
+                        pendingRender = true;
+                        requestAnimationFrame(() => {
+                            render();
+                            pendingRender = false;
+                        });
+                    }
                 } else {
                     console.error('[WebSocket] Unexpected data type:', typeof event.data);
                 }
@@ -431,26 +438,27 @@ namespace InputMonitorMod
         
         function drawImg(img) {
             if (!img || !img.complete) return;
-            const scale = Math.min(600 / img.width, 800 / img.height);
+            if (img.width === 0 || img.height === 0) return;
+            const scale = Math.min(CANVAS_WIDTH / img.width, CANVAS_HEIGHT / img.height);
             const w = img.width * scale;
             const h = img.height * scale;
-            const x = (600 - w) / 2;
-            const y = (800 - h) / 2;
+            const x = (CANVAS_WIDTH - w) / 2;
+            const y = (CANVAS_HEIGHT - h) / 2;
             ctx.drawImage(img, x, y, w, h);
         }
         function render() {
-            ctx.clearRect(0, 0, 600, 800);
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
             drawImg(images.get('waiting'));
             if (currentRenderState.showRestLeft) drawImg(images.get('rest_l'));
             if (currentRenderState.showRestRight) drawImg(images.get('rest_r'));
             for (const [key, pressed] of Object.entries(currentRenderState.buttons)) {
                 if (pressed) drawImg(images.get(key));
             }
-            if (currentRenderState.leftMotion) drawImg(images.get(currentRenderState.leftMotion));
-            if (currentRenderState.rightMotion) drawImg(images.get(currentRenderState.rightMotion));
             if (currentRenderState.leverType) {
                 drawImg(images.get(currentRenderState.leverType + '_' + currentRenderState.leverKey));
             }
+            if (currentRenderState.leftMotion) drawImg(images.get(currentRenderState.leftMotion));
+            if (currentRenderState.rightMotion) drawImg(images.get(currentRenderState.rightMotion));
         }
         
         function parseBinaryData(buffer) {
