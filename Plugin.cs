@@ -11,7 +11,6 @@ using MU3.Mecha;
 using MU3.DB;
 using WebSocketSharp.Server;
 using WebSocketSharp;
-using LitJson;
 
 namespace InputMonitorMod
 {
@@ -628,6 +627,7 @@ namespace InputMonitorMod
         }
         
         const ws = new WebSocket('ws://127.0.0.1:" + config.Port + @"/state');
+        ws.binaryType = 'arraybuffer';
         
         ws.onopen = function() {
             console.log('[WebSocket] Connected');
@@ -636,12 +636,49 @@ namespace InputMonitorMod
         
         ws.onmessage = function(event) {
             try {
-                const data = JSON.parse(event.data);
-                updateDisplay(data);
+                if (event.data instanceof ArrayBuffer) {
+                    const data = parseBinaryData(event.data);
+                    updateDisplay(data);
+                } else {
+                    console.error('[WebSocket] Unexpected data type:', typeof event.data);
+                }
             } catch (err) {
                 console.error('[WebSocket] Parse error:', err);
             }
         };
+        
+        function parseBinaryData(buffer) {
+            const view = new DataView(buffer);
+            
+            const buttonBits = view.getUint16(0, true);
+            
+            const leverRaw = view.getFloat32(2, true);
+            
+            const leverDirect = view.getInt32(6, true);
+            
+            const isReleased = view.getUint8(10) !== 0;
+            
+            const buttonNames = [
+                'Test', 'Service', 'Left1', 'Left2', 'Left3',
+                'Right1', 'Right2', 'Right3', 'LeftWall', 'RightWall',
+                'LeftMenu', 'RightMenu'
+            ];
+            
+            const buttons = {};
+            for (let i = 0; i < buttonNames.length; i++) {
+                buttons[buttonNames[i]] = (buttonBits & (1 << i)) !== 0;
+            }
+            
+            return {
+                buttons: buttons,
+                lever: {
+                    raw: leverRaw,
+                    direct: leverDirect,
+                    isReleased: isReleased,
+                    value: leverRaw
+                }
+            };
+        }
         
         ws.onerror = function(error) {
             console.error('[WebSocket] Error:', error);
@@ -661,6 +698,12 @@ namespace InputMonitorMod
 
     public class InputState
     {
+        private static readonly string[] ButtonNames = new[] { 
+            "Test", "Service", "Left1", "Left2", "Left3", 
+            "Right1", "Right2", "Right3", "LeftWall", "RightWall",
+            "LeftMenu", "RightMenu"
+        };
+        
         public Dictionary<string, bool> buttons = new Dictionary<string, bool>();
         public LeverState lever = new LeverState();
         
@@ -801,6 +844,32 @@ namespace InputMonitorMod
         {
             return !HasChanges(other);
         }
+        
+        public byte[] ToBinary()
+        {
+            byte[] data = new byte[11];
+            
+            ushort buttonBits = 0;
+            for (int i = 0; i < ButtonNames.Length && i < 12; i++)
+            {
+                if (buttons.ContainsKey(ButtonNames[i]) && buttons[ButtonNames[i]])
+                {
+                    buttonBits |= (ushort)(1 << i);
+                }
+            }
+            data[0] = (byte)(buttonBits & 0xFF);
+            data[1] = (byte)((buttonBits >> 8) & 0xFF);
+            
+            byte[] rawBytes = BitConverter.GetBytes(lever.raw);
+            Buffer.BlockCopy(rawBytes, 0, data, 2, 4);
+            
+            byte[] directBytes = BitConverter.GetBytes((int)lever.direct);
+            Buffer.BlockCopy(directBytes, 0, data, 6, 4);
+            
+            data[10] = (byte)(lever.isReleased ? 1 : 0);
+            
+            return data;
+        }
     }
 
     public class LeverState
@@ -853,13 +922,13 @@ namespace InputMonitorMod
         {
             while (true)
             {
-                string serialized;
+                byte[] binaryData;
                 lock (state)
                 {
                     Monitor.Wait(state);
-                    serialized = JsonMapper.ToJson(state);
+                    binaryData = state.ToBinary();
                 }
-                Sessions.Broadcast(serialized);
+                Sessions.Broadcast(binaryData);
             }
         }
 
@@ -867,12 +936,12 @@ namespace InputMonitorMod
         {
             if (e.Data == "request_state")
             {
-                string serialized;
+                byte[] binaryData;
                 lock (state)
                 {
-                    serialized = JsonMapper.ToJson(state);
+                    binaryData = state.ToBinary();
                 }
-                Send(serialized);
+                Send(binaryData);
             }
         }
     }
