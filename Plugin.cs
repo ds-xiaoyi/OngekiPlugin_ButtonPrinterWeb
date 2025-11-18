@@ -279,11 +279,13 @@ namespace InputMonitorMod
         BUTTONS_DATA.forEach(button => {
             const img = new Image();
             img.onload = checkAllLoaded;
+            img.onerror = checkAllLoaded;
             img.src = button.image_url;
             images.set(button.key, img);
         });
         const waitingImg = new Image();
         waitingImg.onload = checkAllLoaded;
+        waitingImg.onerror = checkAllLoaded;
         waitingImg.src = 'images/buttons/waiting.png';
         images.set('waiting', waitingImg);
         
@@ -450,7 +452,8 @@ namespace InputMonitorMod
                 if (pressed) drawImg(images.get(key));
             }
             if (currentRenderState.leverType) {
-                drawImg(images.get(currentRenderState.leverType + '_' + currentRenderState.leverKey));
+                const leverImg = images.get(currentRenderState.leverType + '_' + currentRenderState.leverKey);
+                if (leverImg) drawImg(leverImg);
             }
             if (currentRenderState.leftMotion) drawImg(images.get(currentRenderState.leftMotion));
             if (currentRenderState.rightMotion) drawImg(images.get(currentRenderState.rightMotion));
