@@ -268,12 +268,22 @@ namespace InputMonitorMod
         const images = new Map();
         const leftButtons = new Set(['LeftWall', 'Left1', 'Left2', 'Left3']);
         const rightButtons = new Set(['Right1', 'Right2', 'Right3', 'RightWall']);
+        let loadedCount = 0;
+        const totalImages = BUTTONS_DATA.length + 1;
+        function checkAllLoaded() {
+            loadedCount++;
+            if (loadedCount === totalImages) {
+                render();
+            }
+        }
         BUTTONS_DATA.forEach(button => {
             const img = new Image();
+            img.onload = checkAllLoaded;
             img.src = button.image_url;
             images.set(button.key, img);
         });
         const waitingImg = new Image();
+        waitingImg.onload = checkAllLoaded;
         waitingImg.src = 'images/buttons/waiting.png';
         images.set('waiting', waitingImg);
         
