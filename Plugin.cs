@@ -203,8 +203,8 @@ namespace InputMonitorMod
             overflow: hidden;
         }
         canvas {
-            width: 600px;
-            height: 800px;
+            width: 800px;
+            height: 600px;
             image-rendering: -webkit-optimize-contrast;
             image-rendering: crisp-edges;
         }
@@ -249,8 +249,8 @@ namespace InputMonitorMod
             { key: 'rest_r', image_url: 'images/buttons/r_0.png' }
         ];
         
-        const CANVAS_WIDTH = 600;
-        const CANVAS_HEIGHT = 800;
+        const CANVAS_WIDTH = 800;
+        const CANVAS_HEIGHT = 600;
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
         const dpr = window.devicePixelRatio || 1;
@@ -415,19 +415,12 @@ namespace InputMonitorMod
             ws.send('request_state');
         };
         
-        let pendingRender = false;
         ws.onmessage = function(event) {
             try {
                 if (event.data instanceof ArrayBuffer) {
                     const data = parseBinaryData(event.data);
                     updateDisplay(data);
-                    if (!pendingRender) {
-                        pendingRender = true;
-                        requestAnimationFrame(() => {
-                            render();
-                            pendingRender = false;
-                        });
-                    }
+                    render();
                 } else {
                     console.error('[WebSocket] Unexpected data type:', typeof event.data);
                 }
@@ -438,16 +431,10 @@ namespace InputMonitorMod
         
         function drawImg(img) {
             if (!img || !img.complete) return;
-            if (img.width === 0 || img.height === 0) return;
-            const scale = Math.min(CANVAS_WIDTH / img.width, CANVAS_HEIGHT / img.height);
-            const w = img.width * scale;
-            const h = img.height * scale;
-            const x = (CANVAS_WIDTH - w) / 2;
-            const y = (CANVAS_HEIGHT - h) / 2;
-            ctx.drawImage(img, x, y, w, h);
+            ctx.drawImage(img, 0, 0);
         }
         function render() {
-            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            ctx.clearRect(0, 0, 800, 600);
             drawImg(images.get('waiting'));
             if (currentRenderState.showRestLeft) drawImg(images.get('rest_l'));
             if (currentRenderState.showRestRight) drawImg(images.get('rest_r'));
