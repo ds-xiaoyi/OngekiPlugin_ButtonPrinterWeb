@@ -196,83 +196,22 @@ namespace InputMonitorMod
         
         body {
             background: transparent;
-            font-family: 'Arial', 'Microsoft YaHei', sans-serif;
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
             overflow: hidden;
         }
-        
-        /* 主控制器容器 */
-        #controller-container {
-            position: relative;
+        canvas {
             width: 600px;
             height: 800px;
-            border: none;
-            box-shadow: none;
-            overflow: hidden;
-            background: transparent;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
         }
-        
-        /* 等待背景图片 - 作为底层 */
-        .background-image {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image: url('images/buttons/waiting.png');
-            background-size: contain;
-            background-position: center;
-            background-repeat: no-repeat;
-            z-index: 1;
-            pointer-events: none;
-        }
-        
-        /* 按钮容器 */
-        #buttons-container {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: 2;
-        }
-        
-        /* 动态生成的按钮图片 */
-        .dynamic-button {
-            position: absolute;
-            width: 600px;
-            height: 800px;
-            object-fit: contain;
-            transition: none !important;
-            will-change: opacity;
-            backface-visibility: hidden;
-            transform: translateZ(0);
-        }
-        
-        .dynamic-button.hidden {
-            opacity: 0;
-            transform: scale(0.95);
-            pointer-events: none;
-        }
-        
-        .dynamic-button.visible {
-            opacity: 1;
-            transform: scale(1);
-        }
-        
-        .z-buttons { z-index: 3; }
-        .z-swing { z-index: 99; }
     </style>
 </head>
 <body>
-    <div id='controller-container'>
-        <div class='background-image'></div>
-        <div id='buttons-container'></div>
-    </div>
-
+    <canvas id='canvas'></canvas>
     <script>
         const BUTTONS_DATA = [
             { key: '1_on', image_url: 'images/buttons/1_on.png' },
@@ -310,8 +249,12 @@ namespace InputMonitorMod
             { key: 'rest_r', image_url: 'images/buttons/r_0.png' }
         ];
         
-        console.log('[Init] Loading button images...');
-        
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = 600 * dpr;
+        canvas.height = 800 * dpr;
+        ctx.scale(dpr, dpr);
         const buttonMapping = {
             'LeftWall': '1_on',
             'Left1': '2_on',
@@ -322,35 +265,19 @@ namespace InputMonitorMod
             'Right3': '7_on',
             'RightWall': '8_on'
         };
-        
         const images = new Map();
-        const buttonsContainer = document.getElementById('buttons-container');
-        const swingKeys = new Set([
-            'l_lever_-2', 'l_lever_-1', 'l_lever_0', 'l_lever_1', 'l_lever_2',
-            'r_lever_-2', 'r_lever_-1', 'r_lever_0', 'r_lever_1', 'r_lever_2',
-            'swing_-2', 'swing_-1', 'swing_0', 'swing_1', 'swing_2'
-        ]);
-        
         const leftButtons = new Set(['LeftWall', 'Left1', 'Left2', 'Left3']);
         const rightButtons = new Set(['Right1', 'Right2', 'Right3', 'RightWall']);
+        let loadedCount = 0;
         BUTTONS_DATA.forEach(button => {
-            const img = document.createElement('img');
+            const img = new Image();
+            img.onload = () => { loadedCount++; };
             img.src = button.image_url;
-            img.setAttribute('data-key', button.key);
-            img.className = 'dynamic-button hidden';
-            img.alt = button.key;
-            
-            if (swingKeys.has(button.key)) {
-                img.classList.add('z-swing');
-            } else {
-                img.classList.add('z-buttons');
-            }
-            
-            buttonsContainer.appendChild(img);
             images.set(button.key, img);
         });
-        
-        console.log('[Init] Created', images.size, 'button images');
+        const waitingImg = new Image();
+        waitingImg.src = 'images/buttons/waiting.png';
+        images.set('waiting', waitingImg);
         
         let lastLeverKey = '0';
         let lastLeverPos = 0;
@@ -372,256 +299,110 @@ namespace InputMonitorMod
             if (leverValue > 0.2) return '1';
             return '0';
         }
-        
-        function hideAllLeverImages(leverKey) {
-            const lImg = images.get('l_lever_' + leverKey);
-            const rImg = images.get('r_lever_' + leverKey);
-            const sImg = images.get('swing_' + leverKey);
-            if (lImg) { lImg.classList.remove('visible'); lImg.classList.add('hidden'); }
-            if (rImg) { rImg.classList.remove('visible'); rImg.classList.add('hidden'); }
-            if (sImg) { sImg.classList.remove('visible'); sImg.classList.add('hidden'); }
-        }
-        
-        const initialRightLeverImg = images.get('r_lever_0');
-        const initialRestLeft = images.get('rest_l');
-        if (initialRightLeverImg) {
-            console.log('[Init] Showing initial r_lever_0');
-            initialRightLeverImg.classList.remove('hidden');
-            initialRightLeverImg.classList.add('visible');
-        } else {
-            console.error('[Init] Initial r_lever_0 image not found!');
-        }
-        if (initialRestLeft) {
-            console.log('[Init] Showing initial rest_l');
-            initialRestLeft.classList.remove('hidden');
-            initialRestLeft.classList.add('visible');
-        } else {
-            console.error('[Init] Initial rest_l image not found!');
-        }
+        let currentRenderState = {
+            buttons: {},
+            leverKey: '0',
+            showRestLeft: true,
+            showRestRight: false,
+            leftMotion: null,
+            rightMotion: null
+        };
         
         function updateDisplay(data) {
             if (firstUpdate) {
-                console.log('[First Update] Received data:', data);
                 for (const btnName of Object.keys(buttonMapping)) {
                     previousButtonStates[btnName] = false;
                 }
                 firstUpdate = false;
             }
-            
             for (const [btnName, imgKey] of Object.entries(buttonMapping)) {
                 const isPressed = data.buttons[btnName];
                 const wasPressed = previousButtonStates[btnName];
                 const isLeft = leftButtons.has(btnName);
-                
                 if (isPressed && !wasPressed) {
                     handleButtonPress(btnName, imgKey, isLeft);
-                }
-                else if (!isPressed && wasPressed) {
+                } else if (!isPressed && wasPressed) {
                     handleButtonRelease(btnName, imgKey, isLeft);
                 }
-                
-                const btnImg = images.get(imgKey);
-                if (btnImg) {
-                    if (isPressed) {
-                        btnImg.classList.remove('hidden');
-                        btnImg.classList.add('visible');
-                    } else {
-                        btnImg.classList.remove('visible');
-                        btnImg.classList.add('hidden');
-                    }
-                }
-                
+                currentRenderState.buttons[imgKey] = isPressed;
                 previousButtonStates[btnName] = isPressed;
             }
-            
             const hasLeftButtons = leftPressedButtons.length > 0;
             const hasRightButtons = rightPressedButtons.length > 0;
-            
             const leverKey = getLeverKey(data.lever.value);
             const currentLeverPos = data.lever.raw;
             const isLeverReleased = data.lever.isReleased || false;
-            
             if (currentLeverPos !== lastLeverPos) {
-                hideAllLeverImages(lastLeverKey);
                 lastLeverKey = leverKey;
                 lastLeverPos = currentLeverPos;
             }
-            
-            hideAllLeverImages(leverKey);
-            const restLeft = images.get('rest_l');
-            const restRight = images.get('rest_r');
-            if (restLeft) { restLeft.classList.remove('visible'); restLeft.classList.add('hidden'); }
-            if (restRight) { restRight.classList.remove('visible'); restRight.classList.add('hidden'); }
-            
+            currentRenderState.leverKey = leverKey;
+            currentRenderState.showRestLeft = false;
+            currentRenderState.showRestRight = false;
             if (hasLeftButtons && hasRightButtons) {
-                const swingImg = images.get('swing_' + leverKey);
-                if (swingImg) {
-                    swingImg.classList.remove('hidden');
-                    swingImg.classList.add('visible');
-                }
-                showRestLeft = false;
-                showRestRight = false;
+                currentRenderState.leverType = 'swing';
             } else if (hasLeftButtons && !hasRightButtons) {
                 if (isLeverReleased) {
-                    const swingImg = images.get('swing_' + leverKey);
-                    if (swingImg) {
-                        swingImg.classList.remove('hidden');
-                        swingImg.classList.add('visible');
-                    }
-                    showRestLeft = false;
-                    showRestRight = true;
+                    currentRenderState.leverType = 'swing';
+                    currentRenderState.showRestRight = true;
                 } else {
-                    const lImg = images.get('l_lever_' + leverKey);
-                    if (lImg) {
-                        lImg.classList.remove('hidden');
-                        lImg.classList.add('visible');
-                    }
-                    showRestLeft = false;
-                    showRestRight = false;
+                    currentRenderState.leverType = 'l_lever';
                 }
                 preferLeft = true;
             } else if (!hasLeftButtons && hasRightButtons) {
                 if (isLeverReleased) {
-                    const swingImg = images.get('swing_' + leverKey);
-                    if (swingImg) {
-                        swingImg.classList.remove('hidden');
-                        swingImg.classList.add('visible');
-                    }
-                    showRestLeft = true;
-                    showRestRight = false;
+                    currentRenderState.leverType = 'swing';
+                    currentRenderState.showRestLeft = true;
                 } else {
-                    const rImg = images.get('r_lever_' + leverKey);
-                    if (rImg) {
-                        rImg.classList.remove('hidden');
-                        rImg.classList.add('visible');
-                    }
-                    showRestLeft = false;
-                    showRestRight = false;
+                    currentRenderState.leverType = 'r_lever';
                 }
                 preferLeft = false;
             } else {
                 if (isLeverReleased) {
-                    const swingImg = images.get('swing_' + leverKey);
-                    if (swingImg) {
-                        swingImg.classList.remove('hidden');
-                        swingImg.classList.add('visible');
-                    }
-                    showRestLeft = true;
-                    showRestRight = true;
+                    currentRenderState.leverType = 'swing';
+                    currentRenderState.showRestLeft = true;
+                    currentRenderState.showRestRight = true;
                 } else {
+                    currentRenderState.leverType = preferLeft ? 'l_lever' : 'r_lever';
                     if (preferLeft) {
-                        const lImg = images.get('l_lever_' + leverKey);
-                        if (lImg) {
-                            lImg.classList.remove('hidden');
-                            lImg.classList.add('visible');
-                        }
-                        showRestLeft = true;
-                        showRestRight = false;
+                        currentRenderState.showRestLeft = true;
                     } else {
-                        const rImg = images.get('r_lever_' + leverKey);
-                        if (rImg) {
-                            rImg.classList.remove('hidden');
-                            rImg.classList.add('visible');
-                        }
-                        showRestLeft = false;
-                        showRestRight = true;
+                        currentRenderState.showRestRight = true;
                     }
                 }
             }
-            if (showRestLeft && restLeft) {
-                restLeft.classList.remove('hidden');
-                restLeft.classList.add('visible');
-            }
-            if (showRestRight && restRight) {
-                restRight.classList.remove('hidden');
-                restRight.classList.add('visible');
-            }
-            
-            document.body.offsetHeight;
+            currentRenderState.leftMotion = lastLeftMotion;
+            currentRenderState.rightMotion = lastRightMotion;
         }
         
         function handleButtonPress(btnName, imgKey, isLeft) {
             const motionKey = imgKey.replace('_on', '_motion');
-            const motionImg = images.get(motionKey);
-            
             if (isLeft) {
                 leftPressedButtons.push(btnName);
-                if (lastLeftMotion && lastLeftMotion !== motionKey) {
-                    const oldMotion = images.get(lastLeftMotion);
-                    if (oldMotion) {
-                        oldMotion.classList.remove('visible');
-                        oldMotion.classList.add('hidden');
-                    }
-                }
-                
-                if (motionImg) {
-                    motionImg.classList.remove('hidden');
-                    motionImg.classList.add('visible');
-                    lastLeftMotion = motionKey;
-                }
+                lastLeftMotion = motionKey;
             } else {
                 rightPressedButtons.push(btnName);
-                if (lastRightMotion && lastRightMotion !== motionKey) {
-                    const oldMotion = images.get(lastRightMotion);
-                    if (oldMotion) {
-                        oldMotion.classList.remove('visible');
-                        oldMotion.classList.add('hidden');
-                    }
-                }
-                
-                if (motionImg) {
-                    motionImg.classList.remove('hidden');
-                    motionImg.classList.add('visible');
-                    lastRightMotion = motionKey;
-                }
+                lastRightMotion = motionKey;
             }
         }
         
         function handleButtonRelease(btnName, imgKey, isLeft) {
             const motionKey = imgKey.replace('_on', '_motion');
-            const motionImg = images.get(motionKey);
-            
             if (isLeft) {
                 const index = leftPressedButtons.indexOf(btnName);
-                if (index > -1) {
-                    leftPressedButtons.splice(index, 1);
-                }
-                if (motionImg && lastLeftMotion === motionKey) {
-                    motionImg.classList.remove('visible');
-                    motionImg.classList.add('hidden');
-                    lastLeftMotion = null;
-                }
+                if (index > -1) leftPressedButtons.splice(index, 1);
+                if (lastLeftMotion === motionKey) lastLeftMotion = null;
                 if (leftPressedButtons.length > 0) {
                     const lastBtn = leftPressedButtons[leftPressedButtons.length - 1];
-                    const lastImgKey = buttonMapping[lastBtn];
-                    const lastMotionKey = lastImgKey.replace('_on', '_motion');
-                    const lastMotionImg = images.get(lastMotionKey);
-                    if (lastMotionImg) {
-                        lastMotionImg.classList.remove('hidden');
-                        lastMotionImg.classList.add('visible');
-                        lastLeftMotion = lastMotionKey;
-                    }
+                    lastLeftMotion = buttonMapping[lastBtn].replace('_on', '_motion');
                 }
             } else {
                 const index = rightPressedButtons.indexOf(btnName);
-                if (index > -1) {
-                    rightPressedButtons.splice(index, 1);
-                }
-                if (motionImg && lastRightMotion === motionKey) {
-                    motionImg.classList.remove('visible');
-                    motionImg.classList.add('hidden');
-                    lastRightMotion = null;
-                }
+                if (index > -1) rightPressedButtons.splice(index, 1);
+                if (lastRightMotion === motionKey) lastRightMotion = null;
                 if (rightPressedButtons.length > 0) {
                     const lastBtn = rightPressedButtons[rightPressedButtons.length - 1];
-                    const lastImgKey = buttonMapping[lastBtn];
-                    const lastMotionKey = lastImgKey.replace('_on', '_motion');
-                    const lastMotionImg = images.get(lastMotionKey);
-                    if (lastMotionImg) {
-                        lastMotionImg.classList.remove('hidden');
-                        lastMotionImg.classList.add('visible');
-                        lastRightMotion = lastMotionKey;
-                    }
+                    lastRightMotion = buttonMapping[lastBtn].replace('_on', '_motion');
                 }
             }
         }
@@ -639,6 +420,7 @@ namespace InputMonitorMod
                 if (event.data instanceof ArrayBuffer) {
                     const data = parseBinaryData(event.data);
                     updateDisplay(data);
+                    render();
                 } else {
                     console.error('[WebSocket] Unexpected data type:', typeof event.data);
                 }
@@ -646,6 +428,30 @@ namespace InputMonitorMod
                 console.error('[WebSocket] Parse error:', err);
             }
         };
+        
+        function drawImg(img) {
+            if (!img || !img.complete) return;
+            const scale = Math.min(600 / img.width, 800 / img.height);
+            const w = img.width * scale;
+            const h = img.height * scale;
+            const x = (600 - w) / 2;
+            const y = (800 - h) / 2;
+            ctx.drawImage(img, x, y, w, h);
+        }
+        function render() {
+            ctx.clearRect(0, 0, 600, 800);
+            drawImg(images.get('waiting'));
+            if (currentRenderState.showRestLeft) drawImg(images.get('rest_l'));
+            if (currentRenderState.showRestRight) drawImg(images.get('rest_r'));
+            for (const [key, pressed] of Object.entries(currentRenderState.buttons)) {
+                if (pressed) drawImg(images.get(key));
+            }
+            if (currentRenderState.leftMotion) drawImg(images.get(currentRenderState.leftMotion));
+            if (currentRenderState.rightMotion) drawImg(images.get(currentRenderState.rightMotion));
+            if (currentRenderState.leverType) {
+                drawImg(images.get(currentRenderState.leverType + '_' + currentRenderState.leverKey));
+            }
+        }
         
         function parseBinaryData(buffer) {
             const view = new DataView(buffer);

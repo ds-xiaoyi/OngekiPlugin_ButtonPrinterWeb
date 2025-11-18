@@ -7,6 +7,10 @@
 - [@XiaHeng2333](https://github.com/XiaHeng2333)
 - [@ds-xiaoyi](https://github.com/ds-xiaoyi)
 
+## 版本
+
+- v1.2.0 重构前端渲染：DOM -> Canvas
+
 ## 功能特性
 
 - 基于BepInEx,游戏内置按键捕捉，故兼容所有手台/模式
