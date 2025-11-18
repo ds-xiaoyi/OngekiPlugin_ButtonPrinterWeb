@@ -253,10 +253,8 @@ namespace InputMonitorMod
         const CANVAS_HEIGHT = 600;
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
-        const dpr = window.devicePixelRatio || 1;
-        canvas.width = CANVAS_WIDTH * dpr;
-        canvas.height = CANVAS_HEIGHT * dpr;
-        ctx.scale(dpr, dpr);
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
         const buttonMapping = {
             'LeftWall': '1_on',
             'Left1': '2_on',
