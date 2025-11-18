@@ -4,6 +4,6 @@ namespace InputMonitorMod
     {
         public const string PLUGIN_GUID = "OngekiPlugin_ButtonPrinterWeb";
         public const string PLUGIN_NAME = "OngekiPlugin_ButtonPrinterWeb";
-        public const string PLUGIN_VERSION = "1.1.1";
+        public const string PLUGIN_VERSION = "1.2.0";
     }
 }
